@@ -246,7 +246,18 @@ if os.path.exists(meta_path):
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 
-model_factory = GPT if model_name == 'gpt2' else Nano_GPT
+model_factory = None
+if model_name == 'gpt2':
+    model_factory = GPT
+elif model_name == 'nano':
+    model_factory = Nano_GPT
+elif model_name == 'abt1':
+    from my_model import Nano_GPT_abt1
+    model_factory = Nano_GPT_abt1
+elif model_name == 'abt2':
+    from my_model import Nano_GPT_abt2
+    model_factory = Nano_GPT_abt2
+    
 print(f"Initializing model {model_name} with the following configuration:")
 if init_from == 'scratch':
     # init a new model from scratch

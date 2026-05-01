@@ -27,17 +27,16 @@ weight_decay = 1e-1
 dataset = 'fineweb10B'
 
 # model
+model_name = 'abt2'
 # model_name = 'nano'
-# n_layer = 10
-# n_head = 12
-# # n_embd = 768
-# n_embd = 720
-
-model_name = 'gpt2'
 n_layer = 10
 n_head = 12
-# n_embd = 768
 n_embd = 720
+
+# model_name = 'gpt2'
+# n_layer = 10
+# n_head = 12 #768
+# n_embd = 720
 
 out_dir = f"{model_name}_{time.strftime('%m%d_%H%M%S')}"
 
