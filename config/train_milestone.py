@@ -1,7 +1,7 @@
 # train a miniature character-level shakespeare model
 # good for debugging and playing on macbooks and such
 import time
-out_dir = 'out-shakespeare-char'
+out_dir = 'milestone'
 eval_interval = 250 # keep frequent because we'll overfit
 eval_iters = 200
 log_interval = 10 # don't print too too often
@@ -32,6 +32,10 @@ min_lr = 1e-4 # learning_rate / 10 usually
 beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
 
 warmup_iters = 100 # not super necessary potentially
+# model_name = 'nano'
+model_name = 'nano'
+#gpt2: 10.65M
+#nano: 14.16M
 
 # on macbook also add
 # device = 'cpu'  # run on cpu only

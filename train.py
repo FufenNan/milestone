@@ -28,7 +28,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-
+from my_model import Nano_GPT
+import glob
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -40,9 +41,11 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-wandb_log = False # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'gpt2' # 'run' + str(time.time())
+wandb_log = True # disabled by default
+wandb_project = 'NanoGPT' # project name for wandb
+wandb_run_name = 'run' + str(time.time()) # 'run' + str
+wandb_group_name = 'milestone'
+# wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
@@ -72,6 +75,8 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+# model
+model_name = 'gpt2'
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -101,8 +106,8 @@ else:
 tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
-if master_process:
-    os.makedirs(out_dir, exist_ok=True)
+# if master_process:
+#     os.makedirs(out_dir, exist_ok=True)
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
@@ -113,22 +118,116 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-def get_batch(split):
-    # We recreate np.memmap every batch to avoid a memory leak, as per
-    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-    if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+
+def get_all_memmaps(split, data_dir):
+    files = sorted(glob.glob(os.path.join(data_dir, f"fineweb_{split}_*.bin")))
+    data = [np.memmap(f, dtype=np.uint16, mode='r') for f in files]
+    lengths = [len(d) for d in data]
+    offsets = np.cumsum([0] + lengths)
+    return data, lengths, offsets
+
+def get_batch(split, dataset, data_dir, block_size, batch_size, device, device_type):
+
+    if dataset == 'fineweb10B':
+        data_list, lengths, offsets = get_all_memmaps(split, data_dir)
+        min_len = block_size + 1
+        data_list = [d for d in data_list if len(d) >= min_len]
+        lengths = [len(d) for d in data_list]
+        offsets = np.concatenate([[0], np.cumsum(lengths)])
+        total_len = offsets[-1]
+
+        x_list, y_list = [], []
+        for _ in range(batch_size):
+            i = np.random.randint(0, total_len - block_size - 2)
+            shard_id = np.searchsorted(offsets, i, side="right") - 1
+            data = data_list[shard_id]
+            local_i = i - offsets[shard_id]
+            max_i = len(data) - block_size - 1
+            if local_i > max_i:
+                local_i = max_i
+            x = data[local_i:local_i + block_size].astype(np.int64)
+            y = data[local_i + 1:local_i + 1 + block_size].astype(np.int64)
+
+            x_list.append(torch.from_numpy(x))
+            y_list.append(torch.from_numpy(y))
+        x = torch.stack(x_list)
+        y = torch.stack(y_list)
+
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+        data = np.memmap(os.path.join(data_dir, f'{split}.bin'), dtype=np.uint16, mode='r')
+        ix = torch.randint(len(data) - block_size, (batch_size,))
+        x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+
     if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
     return x, y
+
+# def get_batch(split, dataset, data_dir, block_size, batch_size, device, device_type):
+
+#     if dataset == 'fineweb10B':
+#         data_list, lengths, offsets = get_all_memmaps(split, data_dir)
+#         total_len = offsets[-1]
+#         x_list, y_list = [], []
+#         for _ in range(batch_size):
+#             i = np.random.randint(0, total_len - block_size - 2)
+#             shard_id = np.searchsorted(offsets, i, side="right") - 1
+#             data = data_list[shard_id]
+#             local_i = i - offsets[shard_id]
+#             max_i = len(data) - block_size - 1
+#             if local_i > max_i:
+#                 local_i = max_i
+#             x = data[local_i:local_i + block_size].astype(np.int64)
+#             y = data[local_i + 1:local_i + 1 + block_size].astype(np.int64)
+
+#             x_list.append(torch.from_numpy(x))
+#             y_list.append(torch.from_numpy(y))
+#         x = torch.stack(x_list)
+#         y = torch.stack(y_list)
+
+#     else:
+#         # fallback: single file style (your original code)
+#         if split == 'train':
+#             data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+#         else:
+#             data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+#         ix = torch.randint(len(data) - block_size - 1, (batch_size,))
+#         x = torch.stack([
+#             torch.from_numpy(data[i:i+block_size].astype(np.int64))
+#             for i in ix
+#         ])
+#         y = torch.stack([
+#             torch.from_numpy(data[i+1:i+1+block_size].astype(np.int64))
+#             for i in ix
+#         ])
+
+#     if device_type == 'cuda':
+#         x = x.pin_memory().to(device, non_blocking=True)
+#         y = y.pin_memory().to(device, non_blocking=True)
+#     else:
+#         x = x.to(device)
+#         y = y.to(device)
+
+#     return x, y
+
+# def get_batch(split):
+#     # We recreate np.memmap every batch to avoid a memory leak, as per
+#     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+#     if split == 'train':
+#         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+#     else:
+#         data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+#     ix = torch.randint(len(data) - block_size, (batch_size,))
+#     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+#     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+#     if device_type == 'cuda':
+#         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+#         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+#     else:
+#         x, y = x.to(device), y.to(device)
+#     return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -146,6 +245,9 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+
+model_factory = GPT if model_name == 'gpt2' else Nano_GPT
+print(f"Initializing model {model_name} with the following configuration:")
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -154,7 +256,7 @@ if init_from == 'scratch':
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
+    model = model_factory(gptconf)
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
@@ -167,7 +269,7 @@ elif init_from == 'resume':
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
+    model = model_factory(gptconf)
     state_dict = checkpoint['model']
     # fix the keys of the state dictionary :(
     # honestly no idea how checkpoints sometimes get this prefix, have to debug more
@@ -182,16 +284,16 @@ elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
     override_args = dict(dropout=dropout)
-    model = GPT.from_pretrained(init_from, override_args)
+    model = model_factory.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
+
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
-
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
@@ -219,7 +321,7 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y = get_batch(split, dataset, data_dir, block_size, batch_size, device, device_type)
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
@@ -244,10 +346,15 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
-
+    wandb.init(project=wandb_project, name=wandb_run_name, group=wandb_group_name, config=config)
+    print("wandb logging enabled")
+    if master_process:
+        wandb.log(
+            {"model/params_m": model.get_num_params() / 1e6},
+            step=iter_num
+        )
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y = get_batch('train', dataset, data_dir, block_size, batch_size, device, device_type) # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -283,7 +390,9 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                if not os.path.exists(os.path.join('./output', out_dir)):
+                    os.makedirs(os.path.join('./output', out_dir))
+                torch.save(checkpoint, os.path.join('./output', out_dir, 'ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -300,7 +409,7 @@ while True:
             logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, Y = get_batch('train', dataset, data_dir, block_size, batch_size, device, device_type)
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
