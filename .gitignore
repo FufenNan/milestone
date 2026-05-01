@@ -1,0 +1,5 @@
+checkpoints/
+data/**/*.npy
+data/**/*.bin
+__pycache__/
+*.pyc
