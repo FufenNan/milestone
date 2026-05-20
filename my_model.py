@@ -262,18 +262,18 @@ class Nano_GPT(nn.Module):
 
         x = self.transformer.ln_f(x)
 
+        logits = self.lm_head(x)
         if targets is not None:
-            logits = self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 ignore_index=-1
             )
+            return logits, loss
         else:
-            logits = self.lm_head(x[:, [-1], :])
+            # logits = self.lm_head(x[:, [-1], :])
             loss = None
-
-        return logits, loss
+            return logits
 
     def crop_block_size(self, block_size):
         self.config.block_size = block_size
