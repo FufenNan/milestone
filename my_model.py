@@ -740,3 +740,41 @@ class Nano_GPT_abt2(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+        
+# ============================================================
+# Evaluation API
+# ============================================================
+
+def load_model(checkpoint_path, device):
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # config
+    gptconf = GPTConfig(
+        block_size=checkpoint['model_args']['block_size'],
+        vocab_size=checkpoint['model_args']['vocab_size'],
+        n_layer=checkpoint['model_args']['n_layer'],
+        n_head=checkpoint['model_args']['n_head'],
+        n_embd=checkpoint['model_args']['n_embd'],
+        dropout=0.0,
+        bias=checkpoint['model_args']['bias'],
+    )
+
+    # build model
+    model = Nano_GPT(gptconf)
+
+    # load weights
+    state_dict = checkpoint['model']
+
+    # remove unwanted prefix if exists
+    unwanted_prefix = '_orig_mod.'
+    for k, v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+
+    model.load_state_dict(state_dict)
+
+    model.to(device)
+    model.eval()
+
+    return model
