@@ -15,7 +15,7 @@ max_iters = 5000
 lr_decay_iters = 5000
 
 # eval stuff
-eval_interval = 100
+eval_interval = 250
 eval_iters = 50
 log_interval = 10
 
@@ -29,7 +29,7 @@ warmup_iters = 200
 dataset = 'fineweb_edu'
 
 # model
-model_name = 'abt2'
+model_name = 'nano'
 # total params are ~98.4M with vocab_size=50304 and block_size=1024
 n_layer = 10
 n_head = 10
