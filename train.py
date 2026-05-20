@@ -55,6 +55,7 @@ block_size = 1024
 n_layer = 12
 n_head = 12
 n_embd = 768
+vocab_size = 50304 # GPT-2 vocab_size of 50257, padded up to a multiple of 64
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -118,23 +119,33 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+_memmap_cache = {}
 
 def get_all_memmaps(split, data_dir):
+    cache_key = (split, os.path.abspath(data_dir))
+    if cache_key in _memmap_cache:
+        return _memmap_cache[cache_key]
+
     files = sorted(glob.glob(os.path.join(data_dir, f"fineweb_{split}_*.bin")))
+    if not files:
+        raise FileNotFoundError(f"no fineweb shard files found for split '{split}' in {data_dir}")
     data = [np.memmap(f, dtype=np.uint16, mode='r') for f in files]
     lengths = [len(d) for d in data]
     offsets = np.cumsum([0] + lengths)
-    return data, lengths, offsets
+    _memmap_cache[cache_key] = (data, lengths, offsets)
+    return _memmap_cache[cache_key]
 
 def get_batch(split, dataset, data_dir, block_size, batch_size, device, device_type):
 
-    if dataset == 'fineweb10B':
+    if dataset in ('fineweb10B', 'fineweb_edu'):
         data_list, lengths, offsets = get_all_memmaps(split, data_dir)
         min_len = block_size + 1
         data_list = [d for d in data_list if len(d) >= min_len]
         lengths = [len(d) for d in data_list]
         offsets = np.concatenate([[0], np.cumsum(lengths)])
         total_len = offsets[-1]
+        if total_len <= block_size + 1:
+            raise ValueError(f"not enough tokens in {data_dir} {split} shards for block_size={block_size}")
 
         x_list, y_list = [], []
         for _ in range(batch_size):
@@ -244,7 +255,7 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+                  bias=bias, vocab_size=vocab_size, dropout=dropout) # start with model_args from command line
 
 model_factory = None
 if model_name == 'gpt2':
@@ -264,8 +275,8 @@ if init_from == 'scratch':
     print("Initializing a new model from scratch")
     # determine the vocab size we'll use for from-scratch training
     if meta_vocab_size is None:
-        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+        print(f"defaulting to configured vocab_size of {vocab_size}")
+    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else vocab_size
     gptconf = GPTConfig(**model_args)
     model = model_factory(gptconf)
 elif init_from == 'resume':
