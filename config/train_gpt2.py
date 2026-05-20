@@ -23,6 +23,8 @@ n_head = 10
 n_embd = 640
 dropout = 0.0
 
+vocab_size = 50257
+
 # adamw optimizer
 learning_rate = 3e-4
 max_iters = 5000
