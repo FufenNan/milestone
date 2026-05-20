@@ -55,7 +55,8 @@ block_size = 1024
 n_layer = 12
 n_head = 12
 n_embd = 768
-vocab_size = 50304 # GPT-2 vocab_size of 50257, padded up to a multiple of 64
+# vocab_size = 50304 # GPT-2 vocab_size of 50257, padded up to a multiple of 64
+vocab_size = 50257
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -276,7 +277,8 @@ if init_from == 'scratch':
     # determine the vocab size we'll use for from-scratch training
     if meta_vocab_size is None:
         print(f"defaulting to configured vocab_size of {vocab_size}")
-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else vocab_size
+    # model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else vocab_size
+    model_args['vocab_size'] = vocab_size
     gptconf = GPTConfig(**model_args)
     model = model_factory(gptconf)
 elif init_from == 'resume':
