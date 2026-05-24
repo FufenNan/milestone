@@ -1,4 +1,6 @@
 checkpoints/
+results/
+.venv/
 data/**/*.npy
 data/**/*.bin
 __pycache__/

@@ -31,43 +31,69 @@ def load_config(path):
 
 
 def load_tokens(filename):
-    tokens = np.load(filename, mmap_mode="r")
-    return torch.from_numpy(tokens.astype(np.int64))
+    if filename.endswith(".npy"):
+        return np.load(filename, mmap_mode="r")
+    if filename.endswith(".bin"):
+        return np.memmap(filename, dtype=np.uint16, mode="r")
+    raise ValueError(f"Unsupported token shard format: {filename}")
 
 
 class ShardedTokenLoader:
-    def __init__(self, B, T, process_rank, num_processes, split, data_dir):
+    def __init__(self, B, T, process_rank, num_processes, split, data_dir, allow_val_train_fallback=False):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
         self.split = split
         self.data_dir = data_dir
-        shards = sorted(
-            os.path.join(data_dir, name)
-            for name in os.listdir(data_dir)
-            if split in name and name.endswith(".npy")
-        )
+        shards = self._find_shards(split)
+        if not shards and split == "val" and allow_val_train_fallback:
+            shards = self._find_shards("train")
+            print(f"No val shards found in {data_dir}; using train shards for validation.")
         if not shards:
             raise FileNotFoundError(f"No {split} shards found in {data_dir}")
         self.shards = shards
         self.reset()
 
+    def _find_shards(self, split):
+        suffixes = (".bin", ".npy")
+        return sorted(
+            os.path.join(self.data_dir, name)
+            for name in os.listdir(self.data_dir)
+            if split in name and name.endswith(suffixes)
+        )
+
     def reset(self):
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
+        self._ensure_enough_tokens()
+
+    def _advance_shard(self):
+        self.current_shard = (self.current_shard + 1) % len(self.shards)
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
+
+    def _ensure_enough_tokens(self):
+        attempts = 0
+        while self.current_position + self.B * self.T + 1 > len(self.tokens):
+            self._advance_shard()
+            attempts += 1
+            if attempts > len(self.shards):
+                needed = self.current_position + self.B * self.T + 1
+                raise ValueError(f"No {self.split} shard in {self.data_dir} has enough tokens for {needed=}")
 
     def next_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[self.current_position : self.current_position + B * T + 1]
+        self._ensure_enough_tokens()
+        buf = torch.from_numpy(
+            self.tokens[self.current_position : self.current_position + B * T + 1].astype(np.int64)
+        )
         x = buf[:-1].view(B, T)
         y = buf[1:].view(B, T)
         self.current_position += B * T * self.num_processes
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.current_shard = (self.current_shard + 1) % len(self.shards)
-            self.tokens = load_tokens(self.shards[self.current_shard])
-            self.current_position = B * T * self.process_rank
+            self._advance_shard()
         return x, y
 
 
@@ -133,7 +159,7 @@ def save_checkpoint(raw_model, checkpoint_dir, filename, model_config, step=None
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config/baseline.py")
+    parser.add_argument("--config", default="config/config.py")
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -160,8 +186,9 @@ def main():
         print(f"device: {device}")
         print(f"gradient accumulation steps: {grad_accum_steps}")
 
+    allow_val_train_fallback = getattr(cfg, "allow_val_train_fallback", False)
     train_loader = ShardedTokenLoader(B, T, rank, world_size, "train", data_dir)
-    val_loader = ShardedTokenLoader(B, T, rank, world_size, "val", data_dir)
+    val_loader = ShardedTokenLoader(B, T, rank, world_size, "val", data_dir, allow_val_train_fallback)
 
     model_config = GPTConfig(
         block_size=cfg.block_size,
@@ -169,6 +196,8 @@ def main():
         n_layer=cfg.n_layer,
         n_head=cfg.n_head,
         n_embd=cfg.n_embd,
+        dropout=getattr(cfg, "dropout", 0.0),
+        bias=getattr(cfg, "bias", False),
     )
     model = GPT(model_config).to(device)
     if master_process:
@@ -203,7 +232,8 @@ def main():
                     f.write(f"{step} val {val_loss:.6f}\n")
                 should_save = step > 0 and (step % cfg.checkpoint_interval == 0 or last_step)
                 if should_save:
-                    save_checkpoint(raw_model, checkpoint_dir, "checkpoint.pt", model_config, step, val_loss)
+                    checkpoint_filename = getattr(cfg, "checkpoint_filename", "checkpoint.pt")
+                    save_checkpoint(raw_model, checkpoint_dir, checkpoint_filename, model_config, step, val_loss)
                     if cfg.save_step_checkpoints:
                         save_checkpoint(raw_model, checkpoint_dir, f"checkpoint_{step:05d}.pt", model_config, step, val_loss)
 
