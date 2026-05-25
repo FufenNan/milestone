@@ -11,14 +11,15 @@ This file explains the main parameters in `config/config.py`.
 
 ## Model
 
-Current nano config:
+Current v2 nano config:
 
 ```python
 block_size = 1024
 vocab_size = 50257
-n_layer = 10
-n_head = 12
-n_embd = 648
+n_layer = 12
+n_head = 10
+n_embd = 640
+mlp_hidden_dim = 2048
 dropout = 0.0
 bias = False
 ```
@@ -26,7 +27,7 @@ bias = False
 The model uses token embeddings, RoPE attention, RMSNorm, SwiGLU MLPs, and a tied output head. It has:
 
 ```text
-99,764,784 parameters
+99,027,200 parameters
 ```
 
 This stays below the 100M limit.

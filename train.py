@@ -196,6 +196,7 @@ def main():
         n_layer=cfg.n_layer,
         n_head=cfg.n_head,
         n_embd=cfg.n_embd,
+        mlp_hidden_dim=getattr(cfg, "mlp_hidden_dim", 4 * cfg.n_embd),
         dropout=getattr(cfg, "dropout", 0.0),
         bias=getattr(cfg, "bias", False),
     )

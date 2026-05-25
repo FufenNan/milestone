@@ -12,9 +12,10 @@ from torch.nn import functional as F
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 50257
-    n_layer: int = 10
-    n_head: int = 12
-    n_embd: int = 648
+    n_layer: int = 12
+    n_head: int = 10
+    n_embd: int = 640
+    mlp_hidden_dim: int = 2048
     dropout: float = 0.0
     bias: bool = False
 
@@ -57,6 +58,7 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         self.n_head = config.n_head
         self.head_dim = config.n_embd // config.n_head
+        assert self.head_dim % 2 == 0, "RoPE requires an even head dimension"
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.c_proj.NANOGPT_SCALE_INIT = 1
@@ -92,7 +94,7 @@ class CausalSelfAttention(nn.Module):
 class SwiGLU(nn.Module):
     def __init__(self, config):
         super().__init__()
-        hidden_dim = 4 * config.n_embd
+        hidden_dim = config.mlp_hidden_dim
         self.w1 = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
         self.w2 = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
         self.proj = nn.Linear(hidden_dim, config.n_embd, bias=config.bias)
@@ -122,6 +124,8 @@ class GPT(nn.Module):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
+        assert config.n_embd % config.n_head == 0
+        assert (config.n_embd // config.n_head) % 2 == 0
         self.config = config
         self.transformer = nn.ModuleDict(
             dict(
@@ -145,7 +149,7 @@ class GPT(nn.Module):
         if isinstance(module, nn.Linear):
             std = 0.02
             if hasattr(module, "NANOGPT_SCALE_INIT"):
-                std *= self.config.n_layer**-0.5
+                std *= (2 * self.config.n_layer) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -281,7 +285,9 @@ if __name__ == "__main__":
     config = _load_config_from_file()
     model = GPT(config)
     n_params = sum(p.numel() for p in model.parameters())
+    n_non_embedding = model.get_num_params(non_embedding=True)
     print(f"Parameters: {n_params:,}")
+    print(f"Non-embedding parameters: {n_non_embedding:,}")
     assert n_params <= 100_000_000
     x = torch.randint(0, config.vocab_size, (1, min(16, config.block_size)))
     logits = model(x)

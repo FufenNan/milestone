@@ -7,19 +7,32 @@ checkpoint_filename = "checkpoint.pt"
 log_file = "checkpoints/train.log"
 
 # Nano model: RoPE attention, RMSNorm, SwiGLU MLP, tied token/head weights.
+#
+# Near-100M parameter configuration:
+# - 12 layers for more depth
+# - n_embd = 640
+# - n_head = 10, so head_dim = 64
+# - mlp_hidden_dim = 2048
+#
+# Expected total parameters: about 99M.
 block_size = 1024
 vocab_size = 50257
-n_layer = 10
-n_head = 12
-n_embd = 648
+n_layer = 12
+n_head = 10
+n_embd = 640
+mlp_hidden_dim = 2048
 dropout = 0.0
 bias = False
 
-# Keep the same accumulation shape as config/train_gpt2.py: 33 * 12 * 1024 tokens per step.
+# Keep the same accumulation shape as config/train_gpt2.py:
+# 33 * 12 * 1024 = 405,504 tokens per optimizer step.
 total_batch_size = 405504
 micro_batch_size = 12
-max_steps = 5000
-warmup_steps = 200
+
+# 10,000 steps = about 4.06B tokens.
+max_steps = 10000
+warmup_steps = 400
+
 max_lr = 3e-4
 min_lr = 3e-5
 weight_decay = 0.1
