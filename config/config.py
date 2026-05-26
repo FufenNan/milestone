@@ -41,6 +41,14 @@ beta2 = 0.95
 eps = 1e-8
 grad_clip = 1.0
 
+# Optimizer. On the muon branch, default to Muon for hidden matrix weights
+# with AdamW fallback for embeddings, RMSNorm weights, and optional biases.
+optimizer = "muon"
+muon_lr = 0.02
+muon_momentum = 0.95
+muon_nesterov = True
+muon_ns_steps = 5
+
 # Evaluation and checkpointing.
 eval_interval = 250
 eval_iters = 50

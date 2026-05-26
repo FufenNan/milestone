@@ -219,6 +219,11 @@ def main():
         betas=(cfg.beta1, cfg.beta2),
         eps=cfg.eps,
         device_type=device_type,
+        optimizer=getattr(cfg, "optimizer", "adamw"),
+        muon_lr=getattr(cfg, "muon_lr", 0.02),
+        muon_momentum=getattr(cfg, "muon_momentum", 0.95),
+        muon_nesterov=getattr(cfg, "muon_nesterov", True),
+        muon_ns_steps=getattr(cfg, "muon_ns_steps", 5),
     )
 
     for step in range(cfg.max_steps):
@@ -257,7 +262,7 @@ def main():
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         lr = get_lr(step, cfg)
         for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
+            param_group["lr"] = lr * param_group.get("lr_scale", 1.0)
         optimizer.step()
         if device_type == "cuda":
             torch.cuda.synchronize()

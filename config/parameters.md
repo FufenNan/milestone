@@ -39,7 +39,9 @@ This stays below the 100M limit.
 - `max_steps`: Number of optimizer steps.
 - `warmup_steps`: Linear warmup length.
 - `max_lr` / `min_lr`: Cosine schedule range.
-- `weight_decay`, `beta1`, `beta2`, `eps`: AdamW settings.
+- `optimizer`: Optimizer choice. The `muon` branch defaults to `"muon"`.
+- `weight_decay`, `beta1`, `beta2`, `eps`: AdamW settings for the baseline optimizer and Muon fallback groups.
+- `muon_lr`, `muon_momentum`, `muon_nesterov`, `muon_ns_steps`: Muon settings for hidden matrix weights.
 - `grad_clip`: Maximum gradient norm.
 
 Gradient accumulation is computed in `train.py` as:
