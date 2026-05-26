@@ -1,10 +1,42 @@
-"""Training configuration for the nano FineWeb-Edu pipeline."""
+"""Training configuration for the nano blended-data pipeline."""
 
 # Paths are interpreted relative to the repo root unless absolute.
-data_dir = "data/fineweb_edu"
+data_dir = "data/blend/fineweb_edu"
+val_data_path = "val.bin"
 checkpoint_dir = "checkpoints"
 checkpoint_filename = "checkpoint.pt"
 log_file = "checkpoints/train.log"
+
+# Match the TA-style validation blend during training:
+# FineWeb-Edu 50%, Wikipedia 20%, papers 15%, books 15%.
+# With grad_accum_steps=33, each optimizer step consumes:
+# 16 FineWeb-Edu, 7 Wikipedia, 5 Papers, 5 Books microbatches.
+# Papers are sampled as 70% arXiv article + 30% PubMed article over time.
+train_data_mix = [
+    {
+        "name": "fineweb_edu",
+        "data_dir": "data/blend/fineweb_edu",
+        "micro_batches": 16,
+    },
+    {
+        "name": "wikipedia",
+        "data_dir": "data/blend/wikipedia",
+        "micro_batches": 7,
+    },
+    {
+        "name": "papers",
+        "micro_batches": 5,
+        "subsets": [
+            {"name": "arxiv", "data_dir": "data/blend/papers_arxiv", "weight": 0.7},
+            {"name": "pubmed", "data_dir": "data/blend/papers_pubmed", "weight": 0.3},
+        ],
+    },
+    {
+        "name": "books",
+        "data_dir": "data/blend/books",
+        "micro_batches": 5,
+    },
+]
 
 # Nano model: RoPE attention, RMSNorm, SwiGLU MLP, tied token/head weights.
 #

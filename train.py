@@ -97,6 +97,109 @@ class ShardedTokenLoader:
         return x, y
 
 
+class TokenFileLoader:
+    def __init__(self, B, T, process_rank, num_processes, filename, label="tokens"):
+        self.B = B
+        self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        self.filename = filename
+        self.label = label
+        if not os.path.exists(filename):
+            raise FileNotFoundError(f"Missing {label} token file: {filename}")
+        self.reset()
+
+    def reset(self):
+        self.tokens = load_tokens(self.filename)
+        self.current_position = self.B * self.T * self.process_rank
+        self._ensure_enough_tokens()
+
+    def _ensure_enough_tokens(self):
+        needed = self.current_position + self.B * self.T + 1
+        if needed > len(self.tokens):
+            if self.current_position == self.B * self.T * self.process_rank:
+                raise ValueError(f"{self.label} file {self.filename} is too small for {needed=}")
+            self.current_position = self.B * self.T * self.process_rank
+            needed = self.current_position + self.B * self.T + 1
+            if needed > len(self.tokens):
+                raise ValueError(f"{self.label} file {self.filename} is too small for {needed=}")
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        self._ensure_enough_tokens()
+        buf = torch.from_numpy(
+            self.tokens[self.current_position : self.current_position + B * T + 1].astype(np.int64)
+        )
+        x = buf[:-1].view(B, T)
+        y = buf[1:].view(B, T)
+        self.current_position += B * T * self.num_processes
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_position = self.B * self.T * self.process_rank
+        return x, y
+
+
+class WeightedSource:
+    def __init__(self, name, loaders, weights=None):
+        self.name = name
+        self.loaders = loaders
+        self.weights = list(weights or [1.0] * len(loaders))
+        if len(self.loaders) != len(self.weights):
+            raise ValueError(f"{name} has {len(loaders)} loaders but {len(weights)} weights")
+        if not self.loaders:
+            raise ValueError(f"{name} must have at least one loader")
+        if any(weight <= 0 for weight in self.weights):
+            raise ValueError(f"{name} weights must be positive")
+        self.current_weights = [0.0] * len(self.loaders)
+
+    def next_batch(self):
+        if len(self.loaders) == 1:
+            return self.loaders[0].next_batch()
+
+        total_weight = sum(self.weights)
+        for i, weight in enumerate(self.weights):
+            self.current_weights[i] += weight
+        loader_index = max(range(len(self.loaders)), key=lambda i: self.current_weights[i])
+        self.current_weights[loader_index] -= total_weight
+        return self.loaders[loader_index].next_batch()
+
+
+class MixedTokenLoader:
+    def __init__(self, B, T, process_rank, num_processes, mix_specs):
+        self.schedule = []
+        self.sources = []
+        for spec in mix_specs:
+            source = self._build_source(B, T, process_rank, num_processes, spec)
+            self.sources.append(source)
+            self.schedule.extend([source] * int(spec["micro_batches"]))
+        if not self.schedule:
+            raise ValueError("train_data_mix must contain at least one scheduled microbatch")
+
+    def _build_source(self, B, T, process_rank, num_processes, spec):
+        name = spec["name"]
+        if "subsets" in spec:
+            loaders = []
+            weights = []
+            for subset in spec["subsets"]:
+                data_dir = repo_path(subset["data_dir"])
+                loaders.append(ShardedTokenLoader(B, T, process_rank, num_processes, "train", data_dir))
+                weights.append(float(subset.get("weight", 1.0)))
+            return WeightedSource(name, loaders, weights)
+
+        data_dir = repo_path(spec["data_dir"])
+        loader = ShardedTokenLoader(B, T, process_rank, num_processes, "train", data_dir)
+        return WeightedSource(name, [loader])
+
+    def next_batch(self, micro_step):
+        source = self.schedule[micro_step % len(self.schedule)]
+        return source.next_batch()
+
+    def describe(self):
+        counts = {}
+        for source in self.schedule:
+            counts[source.name] = counts.get(source.name, 0) + 1
+        return ", ".join(f"{name}={count}" for name, count in counts.items())
+
+
 def setup_ddp():
     ddp = int(os.environ.get("RANK", -1)) != -1
     if ddp:
@@ -186,9 +289,27 @@ def main():
         print(f"device: {device}")
         print(f"gradient accumulation steps: {grad_accum_steps}")
 
-    allow_val_train_fallback = getattr(cfg, "allow_val_train_fallback", False)
-    train_loader = ShardedTokenLoader(B, T, rank, world_size, "train", data_dir)
-    val_loader = ShardedTokenLoader(B, T, rank, world_size, "val", data_dir, allow_val_train_fallback)
+    train_mix = getattr(cfg, "train_data_mix", None)
+    if train_mix:
+        train_loader = MixedTokenLoader(B, T, rank, world_size, train_mix)
+        if len(train_loader.schedule) != grad_accum_steps:
+            raise ValueError(
+                f"train_data_mix schedules {len(train_loader.schedule)} microbatches, "
+                f"but grad_accum_steps is {grad_accum_steps}"
+            )
+        if master_process:
+            print(f"train data mix per optimizer step: {train_loader.describe()}")
+    else:
+        train_loader = ShardedTokenLoader(B, T, rank, world_size, "train", data_dir)
+
+    val_data_path = getattr(cfg, "val_data_path", None)
+    if val_data_path:
+        val_loader = TokenFileLoader(B, T, rank, world_size, repo_path(val_data_path), label="validation")
+        if master_process:
+            print(f"validation data: {repo_path(val_data_path)}")
+    else:
+        allow_val_train_fallback = getattr(cfg, "allow_val_train_fallback", False)
+        val_loader = ShardedTokenLoader(B, T, rank, world_size, "val", data_dir, allow_val_train_fallback)
 
     model_config = GPTConfig(
         block_size=cfg.block_size,
@@ -247,7 +368,10 @@ def main():
         optimizer.zero_grad(set_to_none=True)
         loss_accum = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
-            x, y = train_loader.next_batch()
+            if train_mix:
+                x, y = train_loader.next_batch(micro_step)
+            else:
+                x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
             if ddp:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
