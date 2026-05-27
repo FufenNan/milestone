@@ -83,6 +83,10 @@ class ShardedTokenLoader:
                 needed = self.current_position + self.B * self.T + 1
                 raise ValueError(f"No {self.split} shard in {self.data_dir} has enough tokens for {needed=}")
 
+    def set_sequence_length(self, T):
+        self.T = T
+        self._ensure_enough_tokens()
+
     def next_batch(self):
         B, T = self.B, self.T
         self._ensure_enough_tokens()
@@ -124,6 +128,10 @@ class TokenFileLoader:
             if needed > len(self.tokens):
                 raise ValueError(f"{self.label} file {self.filename} is too small for {needed=}")
 
+    def set_sequence_length(self, T):
+        self.T = T
+        self._ensure_enough_tokens()
+
     def next_batch(self):
         B, T = self.B, self.T
         self._ensure_enough_tokens()
@@ -150,6 +158,10 @@ class WeightedSource:
         if any(weight <= 0 for weight in self.weights):
             raise ValueError(f"{name} weights must be positive")
         self.current_weights = [0.0] * len(self.loaders)
+
+    def set_sequence_length(self, T):
+        for loader in self.loaders:
+            loader.set_sequence_length(T)
 
     def next_batch(self):
         if len(self.loaders) == 1:
@@ -193,6 +205,10 @@ class MixedTokenLoader:
         source = self.schedule[micro_step % len(self.schedule)]
         return source.next_batch()
 
+    def set_sequence_length(self, T):
+        for source in self.sources:
+            source.set_sequence_length(T)
+
     def describe(self):
         counts = {}
         for source in self.schedule:
@@ -226,6 +242,49 @@ def get_lr(step, cfg):
     decay_ratio = (step - cfg.warmup_steps) / (cfg.max_steps - cfg.warmup_steps)
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return cfg.min_lr + coeff * (cfg.max_lr - cfg.min_lr)
+
+
+def get_sequence_length(step, cfg):
+    if not getattr(cfg, "use_sequence_curriculum", False):
+        return cfg.block_size
+    length = cfg.block_size
+    for start_step, seq_len in getattr(cfg, "sequence_curriculum", []):
+        if step >= start_step:
+            length = seq_len
+    if length > cfg.block_size:
+        raise ValueError("curriculum sequence length cannot exceed block_size")
+    return length
+
+
+def get_grad_accum_steps(cfg, B, T, world_size):
+    denom = B * T * world_size
+    if cfg.total_batch_size % denom != 0:
+        raise ValueError(
+            f"total_batch_size={cfg.total_batch_size} must divide evenly by "
+            f"micro_batch_size * seq_len * world_size = {denom}"
+        )
+    return cfg.total_batch_size // denom
+
+
+def validate_train_mix_schedule(train_loader, grad_accum_steps):
+    schedule_len = len(train_loader.schedule)
+    if grad_accum_steps % schedule_len != 0:
+        raise ValueError(
+            f"grad_accum_steps={grad_accum_steps} must be a multiple of "
+            f"train_data_mix schedule length {schedule_len}"
+        )
+
+
+def get_group_lrs(optimizer):
+    adamw_lrs = []
+    muon_lrs = []
+    for group in optimizer.param_groups:
+        group_lr = group["lr"]
+        if group.get("lr_scale", 1.0) == 1.0:
+            adamw_lrs.append(group_lr)
+        else:
+            muon_lrs.append(group_lr)
+    return adamw_lrs, muon_lrs
 
 
 def autocast_context(device_type, cfg):
@@ -278,27 +337,25 @@ def main():
     log_file = repo_path(cfg.log_file)
 
     B = cfg.micro_batch_size
-    T = cfg.block_size
-    assert cfg.total_batch_size % (B * T * world_size) == 0
-    grad_accum_steps = cfg.total_batch_size // (B * T * world_size)
+    T = get_sequence_length(0, cfg)
+    grad_accum_steps = get_grad_accum_steps(cfg, B, T, world_size)
     if master_process:
         os.makedirs(checkpoint_dir, exist_ok=True)
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
         with open(log_file, "w") as f:
             f.write("")
         print(f"device: {device}")
+        print(f"sequence length: {T}")
         print(f"gradient accumulation steps: {grad_accum_steps}")
 
     train_mix = getattr(cfg, "train_data_mix", None)
     if train_mix:
         train_loader = MixedTokenLoader(B, T, rank, world_size, train_mix)
-        if len(train_loader.schedule) != grad_accum_steps:
-            raise ValueError(
-                f"train_data_mix schedules {len(train_loader.schedule)} microbatches, "
-                f"but grad_accum_steps is {grad_accum_steps}"
-            )
+        validate_train_mix_schedule(train_loader, grad_accum_steps)
         if master_process:
-            print(f"train data mix per optimizer step: {train_loader.describe()}")
+            schedule_repeats = grad_accum_steps // len(train_loader.schedule)
+            print(f"train data mix schedule: {train_loader.describe()}")
+            print(f"train data mix repeats per optimizer step: {schedule_repeats}")
     else:
         train_loader = ShardedTokenLoader(B, T, rank, world_size, "train", data_dir)
 
@@ -320,6 +377,9 @@ def main():
         mlp_hidden_dim=getattr(cfg, "mlp_hidden_dim", 4 * cfg.n_embd),
         dropout=getattr(cfg, "dropout", 0.0),
         bias=getattr(cfg, "bias", False),
+        use_qk_norm=getattr(cfg, "use_qk_norm", False),
+        qk_norm_scale_init=getattr(cfg, "qk_norm_scale_init", None),
+        zero_init_residual_projections=getattr(cfg, "zero_init_residual_projections", False),
     )
     model = GPT(model_config).to(device)
     if master_process:
@@ -347,14 +407,34 @@ def main():
         muon_ns_steps=getattr(cfg, "muon_ns_steps", 5),
     )
 
+    current_T = T
+    current_grad_accum_steps = grad_accum_steps
     for step in range(cfg.max_steps):
         t0 = time.time()
         last_step = step == cfg.max_steps - 1
+        T = get_sequence_length(step, cfg)
+        grad_accum_steps = get_grad_accum_steps(cfg, B, T, world_size)
+        if train_mix:
+            validate_train_mix_schedule(train_loader, grad_accum_steps)
+        if T != current_T:
+            train_loader.set_sequence_length(T)
+            val_loader.set_sequence_length(T)
+            current_T = T
+            current_grad_accum_steps = grad_accum_steps
+            if master_process:
+                print(f"step {step:5d} | sequence length {T} | gradient accumulation steps {grad_accum_steps}")
+                if train_mix:
+                    schedule_repeats = grad_accum_steps // len(train_loader.schedule)
+                    print(f"step {step:5d} | train data mix repeats per optimizer step {schedule_repeats}")
+        elif grad_accum_steps != current_grad_accum_steps:
+            current_grad_accum_steps = grad_accum_steps
+            if master_process:
+                print(f"step {step:5d} | gradient accumulation steps {grad_accum_steps}")
 
         if step % cfg.eval_interval == 0 or last_step:
             val_loss = estimate_val_loss(model, val_loader, cfg, device, device_type, ddp)
             if master_process:
-                print(f"step {step:5d} | val loss {val_loss:.4f}")
+                print(f"step {step:5d} | val loss {val_loss:.4f} | seq_len {T}")
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss:.6f}\n")
                 should_save = step > 0 and (step % cfg.checkpoint_interval == 0 or last_step)
@@ -387,6 +467,9 @@ def main():
         lr = get_lr(step, cfg)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr * param_group.get("lr_scale", 1.0)
+        adamw_lrs, muon_lrs = get_group_lrs(optimizer)
+        adamw_lr = max(adamw_lrs) if adamw_lrs else 0.0
+        effective_muon_lr = max(muon_lrs) if muon_lrs else 0.0
         optimizer.step()
         if device_type == "cuda":
             torch.cuda.synchronize()
@@ -397,7 +480,8 @@ def main():
             tok_per_sec = tokens_processed / dt
             print(
                 f"step {step:5d} | train loss {loss_accum.item():.6f} | "
-                f"lr {lr:.4e} | norm {norm:.4f} | {tok_per_sec:.0f} tok/s"
+                f"adamw_lr {adamw_lr:.4e} | muon_lr {effective_muon_lr:.4e} | "
+                f"norm {norm:.4f} | seq_len {T} | {tok_per_sec:.0f} tok/s"
             )
             with open(log_file, "a") as f:
                 f.write(f"{step} train {loss_accum.item():.6f}\n")

@@ -2,6 +2,7 @@ import importlib.util
 import inspect
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -18,6 +19,9 @@ class GPTConfig:
     mlp_hidden_dim: int = 2048
     dropout: float = 0.0
     bias: bool = False
+    use_qk_norm: bool = False
+    qk_norm_scale_init: Optional[float] = None
+    zero_init_residual_projections: bool = False
 
 
 def precompute_freqs_cis(dim, max_seq_len, theta=10000.0):
@@ -159,6 +163,12 @@ class CausalSelfAttention(nn.Module):
         self.c_proj.NANOGPT_SCALE_INIT = 1
         self.dropout = config.dropout
         self.resid_dropout = nn.Dropout(config.dropout)
+        self.use_qk_norm = config.use_qk_norm
+        if self.use_qk_norm:
+            scale_init = config.qk_norm_scale_init
+            if scale_init is None:
+                scale_init = self.head_dim ** 0.5
+            self.qk_norm_scale = nn.Parameter(torch.full((config.n_head, 1, 1), float(scale_init)))
         self.register_buffer(
             "freqs_cis",
             precompute_freqs_cis(self.head_dim, config.block_size),
@@ -174,6 +184,10 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rope(q, k, self.freqs_cis)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
+        if self.use_qk_norm:
+            q = F.normalize(q, dim=-1)
+            k = F.normalize(k, dim=-1)
+            q = q * self.qk_norm_scale
         y = F.scaled_dot_product_attention(
             q,
             k,
@@ -244,8 +258,13 @@ class GPT(nn.Module):
         if isinstance(module, nn.Linear):
             std = 0.02
             if hasattr(module, "NANOGPT_SCALE_INIT"):
-                std *= (2 * self.config.n_layer) ** -0.5
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+                if self.config.zero_init_residual_projections:
+                    torch.nn.init.zeros_(module.weight)
+                else:
+                    std *= (2 * self.config.n_layer) ** -0.5
+                    torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            else:
+                torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):

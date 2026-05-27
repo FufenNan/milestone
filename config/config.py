@@ -56,8 +56,21 @@ mlp_hidden_dim = 2048
 dropout = 0.0
 bias = False
 
-# Keep the same accumulation shape as config/train_gpt2.py:
-# 33 * 12 * 1024 = 405,504 tokens per optimizer step.
+# Architecture ablations.
+use_qk_norm = True
+qk_norm_scale_init = None  # None means sqrt(head_dim)
+zero_init_residual_projections = True
+
+# Sequence-length curriculum. The model keeps block_size=1024 as its maximum
+# context, while training/eval batches use the active runtime sequence length.
+use_sequence_curriculum = True
+sequence_curriculum = [
+    (0, 512),
+    (7000, 1024),
+]
+
+# Keep optimizer-step tokens fixed as sequence length changes:
+# 66 * 12 * 512 = 33 * 12 * 1024 = 405,504 tokens per optimizer step.
 total_batch_size = 405504
 micro_batch_size = 12
 
@@ -76,7 +89,7 @@ grad_clip = 1.0
 # Optimizer. On the muon branch, default to Muon for hidden matrix weights
 # with AdamW fallback for embeddings, RMSNorm weights, and optional biases.
 optimizer = "muon"
-muon_lr = 0.02
+muon_lr = 0.015
 muon_momentum = 0.95
 muon_nesterov = True
 muon_ns_steps = 5
