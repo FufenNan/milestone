@@ -7,25 +7,24 @@ checkpoint_dir = "checkpoints"
 checkpoint_filename = "checkpoint.pt"
 log_file = "checkpoints/train.log"
 
-# Match the TA-style validation blend during training:
-# FineWeb-Edu 50%, Wikipedia 20%, papers 15%, books 15%.
+# Match the TA-style validation blend during training with a general-web-heavy mix.
 # With grad_accum_steps=33, each optimizer step consumes:
-# 16 FineWeb-Edu, 7 Wikipedia, 5 Papers, 5 Books microbatches.
+# 23 FineWeb-Edu, 4 Wikipedia, 3 Papers, 3 Books microbatches.
 # Papers are sampled as 70% arXiv article + 30% PubMed article over time.
 train_data_mix = [
     {
         "name": "fineweb_edu",
         "data_dir": "data/blend/fineweb_edu",
-        "micro_batches": 16,
+        "micro_batches": 23,
     },
     {
         "name": "wikipedia",
         "data_dir": "data/blend/wikipedia",
-        "micro_batches": 7,
+        "micro_batches": 4,
     },
     {
         "name": "papers",
-        "micro_batches": 5,
+        "micro_batches": 3,
         "subsets": [
             {"name": "arxiv", "data_dir": "data/blend/papers_arxiv", "weight": 0.7},
             {"name": "pubmed", "data_dir": "data/blend/papers_pubmed", "weight": 0.3},
@@ -34,7 +33,7 @@ train_data_mix = [
     {
         "name": "books",
         "data_dir": "data/blend/books",
-        "micro_batches": 5,
+        "micro_batches": 3,
     },
 ]
 
@@ -57,13 +56,13 @@ dropout = 0.0
 bias = False
 
 # Architecture ablations.
-use_qk_norm = True
+use_qk_norm = False
 qk_norm_scale_init = None  # None means sqrt(head_dim)
 zero_init_residual_projections = False
 
 # Sequence-length curriculum. The model keeps block_size=1024 as its maximum
 # context, while training/eval batches use the active runtime sequence length.
-use_sequence_curriculum = True
+use_sequence_curriculum = False
 sequence_curriculum = [
     (0, 512),
     (2000, 1024),
@@ -75,7 +74,7 @@ total_batch_size = 405504
 micro_batch_size = 12
 
 # 10,000 steps = about 4.06B tokens.
-max_steps = 10000
+max_steps = 12000
 warmup_steps = 400
 
 max_lr = 3e-4
@@ -89,7 +88,7 @@ grad_clip = 1.0
 # Optimizer. On the muon branch, default to Muon for hidden matrix weights
 # with AdamW fallback for embeddings, RMSNorm weights, and optional biases.
 optimizer = "muon"
-muon_lr = 0.015
+muon_lr = 0.02
 muon_momentum = 0.95
 muon_nesterov = True
 muon_ns_steps = 5
@@ -99,6 +98,10 @@ eval_interval = 250
 eval_iters = 50
 log_interval = 10
 checkpoint_interval = 250
+save_best_checkpoint = True
+save_latest_checkpoint = False
+best_checkpoint_filename = "checkpoint.pt"
+latest_checkpoint_filename = "checkpoint_latest.pt"
 save_step_checkpoints = False
 
 # Runtime.

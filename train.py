@@ -409,6 +409,7 @@ def main():
 
     current_T = T
     current_grad_accum_steps = grad_accum_steps
+    best_val_loss = float("inf")
     for step in range(cfg.max_steps):
         t0 = time.time()
         last_step = step == cfg.max_steps - 1
@@ -438,11 +439,24 @@ def main():
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss:.6f}\n")
                 should_save = step > 0 and (step % cfg.checkpoint_interval == 0 or last_step)
-                if should_save:
-                    checkpoint_filename = getattr(cfg, "checkpoint_filename", "checkpoint.pt")
+                if should_save and getattr(cfg, "save_best_checkpoint", False) and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    checkpoint_filename = getattr(
+                        cfg,
+                        "best_checkpoint_filename",
+                        getattr(cfg, "checkpoint_filename", "checkpoint.pt"),
+                    )
                     save_checkpoint(raw_model, checkpoint_dir, checkpoint_filename, model_config, step, val_loss)
-                    if cfg.save_step_checkpoints:
-                        save_checkpoint(raw_model, checkpoint_dir, f"checkpoint_{step:05d}.pt", model_config, step, val_loss)
+                    print(f"step {step:5d} | saved best checkpoint {checkpoint_filename} | val loss {val_loss:.4f}")
+                if should_save and getattr(cfg, "save_latest_checkpoint", True):
+                    checkpoint_filename = getattr(
+                        cfg,
+                        "latest_checkpoint_filename",
+                        getattr(cfg, "checkpoint_filename", "checkpoint.pt"),
+                    )
+                    save_checkpoint(raw_model, checkpoint_dir, checkpoint_filename, model_config, step, val_loss)
+                if should_save and getattr(cfg, "save_step_checkpoints", False):
+                    save_checkpoint(raw_model, checkpoint_dir, f"checkpoint_{step:05d}.pt", model_config, step, val_loss)
 
         model.train()
         optimizer.zero_grad(set_to_none=True)
