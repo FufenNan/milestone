@@ -65,7 +65,7 @@ DEFAULT_SOURCES = {
         "split": "train",
         "output_dir": "books",
         "filename_prefix": "books",
-        "text_fields": ("text", "content", "book", "body"),
+        "text_fields": ("context", "text", "content", "book", "body"),
     },
 }
 
