@@ -59,14 +59,14 @@ bias = False
 # Architecture ablations.
 use_qk_norm = True
 qk_norm_scale_init = None  # None means sqrt(head_dim)
-zero_init_residual_projections = True
+zero_init_residual_projections = False
 
 # Sequence-length curriculum. The model keeps block_size=1024 as its maximum
 # context, while training/eval batches use the active runtime sequence length.
 use_sequence_curriculum = True
 sequence_curriculum = [
     (0, 512),
-    (7000, 1024),
+    (2000, 1024),
 ]
 
 # Keep optimizer-step tokens fixed as sequence length changes:
