@@ -16,10 +16,10 @@ Example:
 
 import argparse
 import itertools
+import json
 import multiprocessing as mp
 import os
 import pickle
-import re
 
 import numpy as np
 
@@ -96,31 +96,23 @@ def parse_args():
     )
     parser.add_argument("--shard-size", type=int, default=default_shard_size)
     parser.add_argument("--num-proc", "--num-procs", dest="num_proc", type=int, default=default_num_proc)
-    parser.add_argument(
-        "--max-shards-per-source",
-        type=int,
-        default=0,
-        help="Maximum shards to write in this run. 0 means no limit.",
-    )
-    parser.add_argument(
-        "--target-shards-per-source",
-        type=int,
-        default=0,
-        help="Total train shards desired per source. With --append-existing, writes only the missing shards.",
-    )
+    parser.add_argument("--max-shards-per-source", type=int, default=0, help="0 means no limit")
     parser.add_argument("--max-docs-per-source", type=int, default=0, help="0 means no limit")
     parser.add_argument(
         "--skip-docs-per-source",
         type=int,
         default=0,
-        help="Skip this many text examples before tokenization. Useful when you recorded a previous cursor.",
+        help="Deprecated alias for --skip-hf-items.",
     )
-    parser.add_argument("--streaming", action="store_true")
+    parser.add_argument("--skip-hf-items", type=int, default=0, help="Skip this many raw HF dataset items.")
     parser.add_argument(
-        "--append-existing",
-        action="store_true",
-        help="Start new shard numbers after existing train shards instead of overwriting from 000000.",
+        "--skip-tokens-in-first-item",
+        type=int,
+        default=0,
+        help="Resume inside the first unskipped HF item by dropping this many already-written tokens.",
     )
+    parser.add_argument("--start-shard-index", type=int, default=0)
+    parser.add_argument("--streaming", action="store_true")
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -218,18 +210,6 @@ def load_hf_dataset(spec, streaming):
     return load_dataset(spec["dataset"], **kwargs)
 
 
-def existing_train_indices(output_dir, filename_prefix):
-    pattern = re.compile(rf"^{re.escape(filename_prefix)}_train_(\d{{6}})\.(bin|npy)$")
-    indices = []
-    if not os.path.isdir(output_dir):
-        return indices
-    for name in os.listdir(output_dir):
-        match = pattern.match(name)
-        if match:
-            indices.append(int(match.group(1)))
-    return sorted(indices)
-
-
 def maybe_shuffle_dataset(ds, source_name, args):
     if args.shuffle_seed is None:
         return ds
@@ -240,6 +220,35 @@ def maybe_shuffle_dataset(ds, source_name, args):
         return ds.shuffle(seed=seed)
 
 
+def iter_text_items(dataset_iter, text_fields, start_item):
+    for item_index, doc in enumerate(dataset_iter):
+        if item_index < start_item:
+            continue
+        text = pick_text(doc, text_fields)
+        if text.strip():
+            yield item_index, text
+
+
+def tokenize_item(item):
+    item_index, text = item
+    return item_index, tokenize_text(text)
+
+
+def write_state(output_dir, spec, state):
+    filename = os.path.join(output_dir, f"{spec['filename_prefix']}_prepare_state.json")
+    tmp_filename = filename + ".tmp"
+    with open(tmp_filename, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp_filename, filename)
+
+
+def resume_cursor(item_index, token_offset, item_token_count):
+    if token_offset >= item_token_count:
+        return item_index + 1, 0
+    return item_index, token_offset
+
+
 def prepare_source(source_name, spec, args):
     from tqdm import tqdm
 
@@ -247,46 +256,31 @@ def prepare_source(source_name, spec, args):
     os.makedirs(output_dir, exist_ok=True)
     write_meta(output_dir)
 
-    existing_indices = existing_train_indices(output_dir, spec["filename_prefix"])
-    if args.append_existing and existing_indices:
-        shard_index = max(existing_indices) + 1
-        print(
-            f"Appending {source_name}: found {len(existing_indices)} existing train shards; "
-            f"next shard index is {shard_index:06d}"
-        )
-    else:
-        shard_index = 0
-
-    if args.target_shards_per_source and args.append_existing:
-        missing = args.target_shards_per_source - len(existing_indices)
-        if missing <= 0:
-            print(
-                f"Skipping {source_name}: already has {len(existing_indices)} train shards, "
-                f"target is {args.target_shards_per_source}"
-            )
-            return
-        max_new_shards = missing
-    elif args.target_shards_per_source:
-        max_new_shards = args.target_shards_per_source
-    else:
-        max_new_shards = args.max_shards_per_source
+    shard_index = args.start_shard_index
+    skip_hf_items = max(args.skip_hf_items, args.skip_docs_per_source)
 
     print(f"Preparing {source_name}: {spec['dataset']} ({spec['config'] or 'default'})")
     ds = load_hf_dataset(spec, args.streaming)
     ds = maybe_shuffle_dataset(ds, source_name, args)
-    texts = iter_texts(ds, spec["text_fields"])
-    if args.skip_docs_per_source:
-        texts = itertools.islice(texts, args.skip_docs_per_source, None)
+    texts = iter_text_items(ds, spec["text_fields"], skip_hf_items)
     if args.max_docs_per_source:
         texts = itertools.islice(texts, args.max_docs_per_source)
 
     shards_written = 0
     token_count = 0
+    tokens_written = 0
     progress_bar = None
     all_tokens_np = np.empty((args.shard_size,), dtype=np.uint16)
 
     with mp.Pool(args.num_proc, initializer=init_tokenizer) as pool:
-        for tokens in pool.imap(tokenize_text, texts, chunksize=16):
+        for item_index, tokens in pool.imap(tokenize_item, texts, chunksize=16):
+            token_base = 0
+            if item_index == skip_hf_items and args.skip_tokens_in_first_item:
+                token_base = args.skip_tokens_in_first_item
+                if token_base >= len(tokens):
+                    continue
+                tokens = tokens[token_base:]
+
             pos = 0
             while pos < len(tokens):
                 if progress_bar is None:
@@ -301,6 +295,7 @@ def prepare_source(source_name, spec, args):
                 all_tokens_np[token_count : token_count + n] = tokens[pos : pos + n]
                 token_count += n
                 pos += n
+                tokens_written += n
                 progress_bar.update(n)
 
                 if token_count == args.shard_size:
@@ -309,18 +304,61 @@ def prepare_source(source_name, spec, args):
                         f"{spec['filename_prefix']}_train_{shard_index:06d}.bin",
                     )
                     write_datafile(filename, all_tokens_np, overwrite=args.overwrite)
+                    next_item_index, next_item_token_offset = resume_cursor(
+                        item_index, token_base + pos, token_base + len(tokens)
+                    )
+                    write_state(
+                        output_dir,
+                        spec,
+                        {
+                            "source": source_name,
+                            "dataset": spec["dataset"],
+                            "config": spec["config"],
+                            "split": spec["split"],
+                            "streaming": args.streaming,
+                            "shuffle_seed": args.shuffle_seed,
+                            "shuffle_buffer_size": args.shuffle_buffer_size,
+                            "shard_size": args.shard_size,
+                            "last_written_shard_index": shard_index,
+                            "next_shard_index": shard_index + 1,
+                            "next_hf_item_index": next_item_index,
+                            "next_item_token_offset": next_item_token_offset,
+                            "tokens_in_partial_shard": 0,
+                            "tokens_written_this_run": tokens_written,
+                        },
+                    )
                     shard_index += 1
                     shards_written += 1
                     token_count = 0
                     progress_bar.close()
                     progress_bar = None
 
-                    if max_new_shards and shards_written >= max_new_shards:
+                    if args.max_shards_per_source and shards_written >= args.max_shards_per_source:
                         return
 
     if token_count:
         filename = os.path.join(output_dir, f"{spec['filename_prefix']}_train_{shard_index:06d}.bin")
         write_datafile(filename, all_tokens_np[:token_count], overwrite=args.overwrite)
+        write_state(
+            output_dir,
+            spec,
+            {
+                "source": source_name,
+                "dataset": spec["dataset"],
+                "config": spec["config"],
+                "split": spec["split"],
+                "streaming": args.streaming,
+                "shuffle_seed": args.shuffle_seed,
+                "shuffle_buffer_size": args.shuffle_buffer_size,
+                "shard_size": args.shard_size,
+                "last_written_shard_index": shard_index,
+                "next_shard_index": shard_index + 1,
+                "next_hf_item_index": None,
+                "next_item_token_offset": 0,
+                "tokens_in_partial_shard": token_count,
+                "tokens_written_this_run": tokens_written,
+            },
+        )
         if progress_bar is not None:
             progress_bar.close()
 

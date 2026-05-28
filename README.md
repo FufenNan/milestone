@@ -58,13 +58,24 @@ data/blend/books/books_train_000000.bin
 
 Generated shards should stay untracked.
 
-To append more shards without deleting the old ones, use `--append-existing` and a total target:
+Each source writes a cursor file next to its shards, for example `fineweb_prepare_state.json`. To append more shards without deleting the old ones, resume from that state:
 
 ```bash
-python data/blend.py --data-root data/blend --streaming --sources fineweb --target-shards-per-source 40 --append-existing --shuffle-seed 20260528
+python data/blend.py --data-root data/blend_new --streaming --sources fineweb --shard-size 100000000 --max-shards-per-source 5 --start-shard-index <next_shard_index> --skip-hf-items <next_hf_item_index> --skip-tokens-in-first-item <next_item_token_offset>
 ```
 
-For a 20,000-step run at the default batch size, the loader consumes about 8.11B tokens total. With the no-PubMed PG19 blend and 100M-token shards, targets around FineWeb-Edu 40, Wikipedia 18, arXiv 13, and PG19 13 avoid cycling each source more than once. If a previous exact dataset cursor was not saved, `--shuffle-seed` samples a different stream order for the appended shards.
+For a 20,000-step run at the default batch size, the loader consumes about 8.11B tokens total. With the no-PubMed PG19 blend and 100M-token shards, targets around FineWeb-Edu 40, Wikipedia 18, arXiv 13, and PG19 13 avoid cycling each source more than once.
+
+For a clean no-PubMed rebuild that leaves the old dataset untouched, write to `data/blend_new` and point the training config there:
+
+```bash
+python data/blend.py --data-root data/blend_new --streaming --sources fineweb --shard-size 100000000 --max-shards-per-source 40 --overwrite
+python data/blend.py --data-root data/blend_new --streaming --sources wikipedia --shard-size 100000000 --max-shards-per-source 18 --overwrite
+python data/blend.py --data-root data/blend_new --streaming --sources arxiv --shard-size 100000000 --max-shards-per-source 13 --overwrite
+python data/blend.py --data-root data/blend_new --streaming --sources pg19 --shard-size 100000000 --max-shards-per-source 13 --overwrite
+```
+
+Those are the per-source targets for the 20,000-step no-PubMed blend: FineWeb-Edu 40, Wikipedia 18, arXiv 13, and PG19 13.
 
 ## Train
 
