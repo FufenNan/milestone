@@ -250,7 +250,7 @@ def resume_cursor(item_index, token_offset, item_token_count):
 
 
 def prepare_source(source_name, spec, args):
-    from tqdm import tqdm
+    from tqdm.notebook import tqdm
 
     output_dir = repo_path(os.path.join(args.data_root, spec["output_dir"]))
     os.makedirs(output_dir, exist_ok=True)
