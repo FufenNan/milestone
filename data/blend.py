@@ -19,6 +19,7 @@ import itertools
 import multiprocessing as mp
 import os
 import pickle
+import re
 
 import numpy as np
 
@@ -95,9 +96,43 @@ def parse_args():
     )
     parser.add_argument("--shard-size", type=int, default=default_shard_size)
     parser.add_argument("--num-proc", "--num-procs", dest="num_proc", type=int, default=default_num_proc)
-    parser.add_argument("--max-shards-per-source", type=int, default=0, help="0 means no limit")
+    parser.add_argument(
+        "--max-shards-per-source",
+        type=int,
+        default=0,
+        help="Maximum shards to write in this run. 0 means no limit.",
+    )
+    parser.add_argument(
+        "--target-shards-per-source",
+        type=int,
+        default=0,
+        help="Total train shards desired per source. With --append-existing, writes only the missing shards.",
+    )
     parser.add_argument("--max-docs-per-source", type=int, default=0, help="0 means no limit")
+    parser.add_argument(
+        "--skip-docs-per-source",
+        type=int,
+        default=0,
+        help="Skip this many text examples before tokenization. Useful when you recorded a previous cursor.",
+    )
     parser.add_argument("--streaming", action="store_true")
+    parser.add_argument(
+        "--append-existing",
+        action="store_true",
+        help="Start new shard numbers after existing train shards instead of overwriting from 000000.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing existing shard files. By default existing files are protected.",
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=None,
+        help="Shuffle dataset order before tokenization. Helpful for appending more samples without a saved cursor.",
+    )
+    parser.add_argument("--shuffle-buffer-size", type=int, default=10_000)
     parser.add_argument("--wikipedia-name", default="20231101.en")
     return parser.parse_args()
 
@@ -155,7 +190,9 @@ def tokenize_text(text):
     return tokens_np.astype(np.uint16)
 
 
-def write_datafile(filename, tokens_np):
+def write_datafile(filename, tokens_np, overwrite=False):
+    if os.path.exists(filename) and not overwrite:
+        raise FileExistsError(f"Refusing to overwrite existing shard: {filename}")
     tokens_np.tofile(filename)
 
 
@@ -181,6 +218,28 @@ def load_hf_dataset(spec, streaming):
     return load_dataset(spec["dataset"], **kwargs)
 
 
+def existing_train_indices(output_dir, filename_prefix):
+    pattern = re.compile(rf"^{re.escape(filename_prefix)}_train_(\d{{6}})\.(bin|npy)$")
+    indices = []
+    if not os.path.isdir(output_dir):
+        return indices
+    for name in os.listdir(output_dir):
+        match = pattern.match(name)
+        if match:
+            indices.append(int(match.group(1)))
+    return sorted(indices)
+
+
+def maybe_shuffle_dataset(ds, source_name, args):
+    if args.shuffle_seed is None:
+        return ds
+    seed = args.shuffle_seed + sum(ord(ch) for ch in source_name)
+    try:
+        return ds.shuffle(seed=seed, buffer_size=args.shuffle_buffer_size)
+    except TypeError:
+        return ds.shuffle(seed=seed)
+
+
 def prepare_source(source_name, spec, args):
     from tqdm import tqdm
 
@@ -188,13 +247,40 @@ def prepare_source(source_name, spec, args):
     os.makedirs(output_dir, exist_ok=True)
     write_meta(output_dir)
 
+    existing_indices = existing_train_indices(output_dir, spec["filename_prefix"])
+    if args.append_existing and existing_indices:
+        shard_index = max(existing_indices) + 1
+        print(
+            f"Appending {source_name}: found {len(existing_indices)} existing train shards; "
+            f"next shard index is {shard_index:06d}"
+        )
+    else:
+        shard_index = 0
+
+    if args.target_shards_per_source and args.append_existing:
+        missing = args.target_shards_per_source - len(existing_indices)
+        if missing <= 0:
+            print(
+                f"Skipping {source_name}: already has {len(existing_indices)} train shards, "
+                f"target is {args.target_shards_per_source}"
+            )
+            return
+        max_new_shards = missing
+    elif args.target_shards_per_source:
+        max_new_shards = args.target_shards_per_source
+    else:
+        max_new_shards = args.max_shards_per_source
+
     print(f"Preparing {source_name}: {spec['dataset']} ({spec['config'] or 'default'})")
     ds = load_hf_dataset(spec, args.streaming)
+    ds = maybe_shuffle_dataset(ds, source_name, args)
     texts = iter_texts(ds, spec["text_fields"])
+    if args.skip_docs_per_source:
+        texts = itertools.islice(texts, args.skip_docs_per_source, None)
     if args.max_docs_per_source:
         texts = itertools.islice(texts, args.max_docs_per_source)
 
-    shard_index = 0
+    shards_written = 0
     token_count = 0
     progress_bar = None
     all_tokens_np = np.empty((args.shard_size,), dtype=np.uint16)
@@ -222,18 +308,19 @@ def prepare_source(source_name, spec, args):
                         output_dir,
                         f"{spec['filename_prefix']}_train_{shard_index:06d}.bin",
                     )
-                    write_datafile(filename, all_tokens_np)
+                    write_datafile(filename, all_tokens_np, overwrite=args.overwrite)
                     shard_index += 1
+                    shards_written += 1
                     token_count = 0
                     progress_bar.close()
                     progress_bar = None
 
-                    if args.max_shards_per_source and shard_index >= args.max_shards_per_source:
+                    if max_new_shards and shards_written >= max_new_shards:
                         return
 
     if token_count:
         filename = os.path.join(output_dir, f"{spec['filename_prefix']}_train_{shard_index:06d}.bin")
-        write_datafile(filename, all_tokens_np[:token_count])
+        write_datafile(filename, all_tokens_np[:token_count], overwrite=args.overwrite)
         if progress_bar is not None:
             progress_bar.close()
 

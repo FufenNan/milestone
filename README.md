@@ -58,6 +58,14 @@ data/blend/books/books_train_000000.bin
 
 Generated shards should stay untracked.
 
+To append more shards without deleting the old ones, use `--append-existing` and a total target:
+
+```bash
+python data/blend.py --data-root data/blend --streaming --sources fineweb --target-shards-per-source 40 --append-existing --shuffle-seed 20260528
+```
+
+For a 20,000-step run at the default batch size, the loader consumes about 8.11B tokens total. With the no-PubMed PG19 blend and 100M-token shards, targets around FineWeb-Edu 40, Wikipedia 18, arXiv 13, and PG19 13 avoid cycling each source more than once. If a previous exact dataset cursor was not saved, `--shuffle-seed` samples a different stream order for the appended shards.
+
 ## Train
 
 Single GPU or CPU:
