@@ -7,6 +7,7 @@ Default sources:
     arxiv        armanc/scientific_papers, arxiv, article
     pubmed       armanc/scientific_papers, pubmed, article
     books        incredible45/Gutenberg-BookCorpus-Cleaned-Data-English
+    pg19         emozilla/pg19, text
 
 Example:
     python data/blend.py --data-root data/blend --streaming --num-proc 4
@@ -66,6 +67,14 @@ DEFAULT_SOURCES = {
         "output_dir": "books",
         "filename_prefix": "books",
         "text_fields": ("context", "text", "content", "book", "body"),
+    },
+    "pg19": {
+        "dataset": "emozilla/pg19",
+        "config": None,
+        "split": "train",
+        "output_dir": "pg19",
+        "filename_prefix": "pg19",
+        "text_fields": ("text",),
     },
 }
 
