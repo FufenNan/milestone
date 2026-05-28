@@ -1,7 +1,7 @@
 """1000-step ablation config using PG19 instead of books and no PubMed."""
 
 # Paths are interpreted relative to the repo root unless absolute.
-data_dir = "data/blend/fineweb_edu"
+data_dir = "data/blend_new/fineweb_edu"
 val_data_path = "val.bin"
 checkpoint_dir = "checkpoints"
 checkpoint_filename = "checkpoint.pt"
@@ -15,24 +15,24 @@ log_file = "checkpoints/train.log"
 train_data_mix = [
     {
         "name": "fineweb_edu",
-        "data_dir": "data/blend/fineweb_edu",
+        "data_dir": "data/blend_new/fineweb_edu",
         "micro_batches": 16,
     },
     {
         "name": "wikipedia",
-        "data_dir": "data/blend/wikipedia",
+        "data_dir": "data/blend_new/wikipedia",
         "micro_batches": 7,
     },
     {
         "name": "papers",
         "micro_batches": 5,
         "subsets": [
-            {"name": "arxiv", "data_dir": "data/blend/papers_arxiv", "weight": 1.0},
+            {"name": "arxiv", "data_dir": "data/blend_new/papers_arxiv", "weight": 1.0},
         ],
     },
     {
         "name": "pg19",
-        "data_dir": "data/blend/pg19",
+        "data_dir": "data/blend_new/pg19",
         "micro_batches": 5,
     },
 ]
