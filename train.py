@@ -415,7 +415,13 @@ def get_rng_state():
     }
 
 
-def validate_resume_config(checkpoint, cfg, reset_optimizer=False, reset_loader_state=False):
+def validate_resume_config(
+    checkpoint,
+    cfg,
+    reset_optimizer=False,
+    reset_loader_state=False,
+    allow_scheduler_change=False,
+):
     saved_model_config = checkpoint.get("model_config", {})
     current_config = config_to_dict(cfg)
     for key in sorted(MODEL_CONFIG_KEYS):
@@ -428,6 +434,15 @@ def validate_resume_config(checkpoint, cfg, reset_optimizer=False, reset_loader_
     saved_train_config = checkpoint.get("train_config", {})
     if not reset_optimizer and saved_train_config.get("optimizer", "adamw") != current_config.get("optimizer", "adamw"):
         raise ValueError("Optimizer changed; use --reset-optimizer to resume with a fresh optimizer")
+
+    if not allow_scheduler_change:
+        for key in ("max_steps", "warmup_steps", "max_lr", "min_lr"):
+            if key in saved_train_config and key in current_config and saved_train_config[key] != current_config[key]:
+                raise ValueError(
+                    f"Scheduler config {key} changed "
+                    f"(checkpoint={saved_train_config[key]!r}, current={current_config[key]!r}); "
+                    "keep scheduler settings unchanged for an exact resume, or use --allow-scheduler-change"
+                )
 
     if not reset_loader_state:
         for key in ("data_dir", "val_data_path", "train_data_mix"):
@@ -497,6 +512,7 @@ def main():
     parser.add_argument("--reset-loader-state", action="store_true")
     parser.add_argument("--reset-optimizer", action="store_true")
     parser.add_argument("--reset-rng", action="store_true")
+    parser.add_argument("--allow-scheduler-change", action="store_true")
     args = parser.parse_args()
     cfg = load_config(args.config)
     resume_path = args.resume or getattr(cfg, "resume_from", None)
@@ -600,6 +616,7 @@ def main():
                 cfg,
                 reset_optimizer=args.reset_optimizer,
                 reset_loader_state=args.reset_loader_state,
+                allow_scheduler_change=args.allow_scheduler_change,
             )
             if not args.reset_optimizer:
                 optimizer.load_state_dict(checkpoint["optimizer"])
@@ -624,6 +641,8 @@ def main():
     if end_step <= start_step:
         raise ValueError(f"No training steps requested: start_step={start_step}, end_step={end_step}")
     checkpoint_filename = getattr(cfg, "checkpoint_filename", "checkpoint.pt")
+    best_checkpoint_filename = getattr(cfg, "best_checkpoint_filename", "best_checkpoint.pt")
+    last_val_loss = None
     if master_process:
         print(f"training global steps: {start_step}..{end_step - 1}")
 
@@ -671,11 +690,12 @@ def main():
 
         if step % cfg.eval_interval == 0 or last_step:
             val_loss = estimate_val_loss(model, val_loader, cfg, device, device_type, ddp)
+            last_val_loss = val_loss
             is_best = val_loss < best_val_loss
             if is_best:
                 best_val_loss = val_loss
             if master_process:
-                suffix = " | saved checkpoint.pt" if is_best else ""
+                suffix = f" | saved {best_checkpoint_filename}" if is_best else ""
                 print(f"step {step:5d} | val loss {val_loss:.4f} | best {best_val_loss:.4f}{suffix}")
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss:.6f} best {best_val_loss:.6f}\n")
@@ -684,7 +704,7 @@ def main():
                         raw_model,
                         optimizer,
                         checkpoint_dir,
-                        checkpoint_filename,
+                        best_checkpoint_filename,
                         model_config,
                         cfg,
                         step,
@@ -695,22 +715,45 @@ def main():
                         grad_accum_steps,
                         world_size,
                     )
-                    if getattr(cfg, "save_step_checkpoints", False):
-                        save_training_checkpoint(
-                            raw_model,
-                            optimizer,
-                            checkpoint_dir,
-                            f"checkpoint_{step:05d}.pt",
-                            model_config,
-                            cfg,
-                            step,
-                            val_loss,
-                            best_val_loss,
-                            train_loader,
-                            val_loader,
-                            grad_accum_steps,
-                            world_size,
-                        )
+
+        save_latest = last_step or (cfg.checkpoint_interval > 0 and step % cfg.checkpoint_interval == 0)
+        if save_latest:
+            if master_process:
+                print(f"step {step:5d} | saved {checkpoint_filename}")
+                with open(log_file, "a") as f:
+                    f.write(f"{step} checkpoint {checkpoint_filename}\n")
+            if master_process:
+                save_training_checkpoint(
+                    raw_model,
+                    optimizer,
+                    checkpoint_dir,
+                    checkpoint_filename,
+                    model_config,
+                    cfg,
+                    step,
+                    last_val_loss,
+                    best_val_loss,
+                    train_loader,
+                    val_loader,
+                    grad_accum_steps,
+                    world_size,
+                )
+                if getattr(cfg, "save_step_checkpoints", False):
+                    save_training_checkpoint(
+                        raw_model,
+                        optimizer,
+                        checkpoint_dir,
+                        f"checkpoint_{step:05d}.pt",
+                        model_config,
+                        cfg,
+                        step,
+                        last_val_loss,
+                        best_val_loss,
+                        train_loader,
+                        val_loader,
+                        grad_accum_steps,
+                        world_size,
+                    )
 
     if ddp:
         dist.destroy_process_group()
