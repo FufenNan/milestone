@@ -77,6 +77,8 @@ python data/blend.py --data-root data/blend_new --streaming --sources pg19 --sha
 
 Those are the per-source targets for the 20,000-step no-PubMed blend: FineWeb-Edu 40, Wikipedia 18, arXiv 13, and PG19 13.
 
+For 25,000 steps at the same blend, extend `data/blend_new` to FineWeb-Edu 50, Wikipedia 22, arXiv 16, and PG19 16. If the `*_prepare_state.json` files are present, resume with `--start-shard-index`, `--skip-hf-items`, and `--skip-tokens-in-first-item` from the state instead of overwriting existing shards.
+
 ## Train
 
 Single GPU or CPU:
