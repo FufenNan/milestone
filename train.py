@@ -360,13 +360,65 @@ def setup_ddp():
 
 
 def get_lr(step, cfg):
-    if step < cfg.warmup_steps:
-        return cfg.max_lr * (step + 1) / cfg.warmup_steps
-    if step > cfg.max_steps:
+    schedule_start = int(getattr(cfg, "lr_schedule_start_step", 0))
+    schedule_steps = int(getattr(cfg, "lr_schedule_steps", cfg.max_steps - schedule_start))
+    warmup_steps = int(getattr(cfg, "warmup_steps", 0))
+    local_step = step - schedule_start
+    if local_step < 0:
+        return cfg.max_lr
+    if warmup_steps > 0 and local_step < warmup_steps:
+        return cfg.max_lr * (local_step + 1) / warmup_steps
+    if schedule_steps <= warmup_steps or local_step > schedule_steps:
         return cfg.min_lr
-    decay_ratio = (step - cfg.warmup_steps) / (cfg.max_steps - cfg.warmup_steps)
+    decay_ratio = (local_step - warmup_steps) / (schedule_steps - warmup_steps)
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return cfg.min_lr + coeff * (cfg.max_lr - cfg.min_lr)
+
+
+def get_named_lrs(optimizer):
+    named = {}
+    anonymous_count = 0
+    for group in optimizer.param_groups:
+        name = group.get("name")
+        if name is None:
+            lr_scale = float(group.get("lr_scale", 1.0))
+            if lr_scale > 1.0:
+                name = "muon"
+            elif float(group.get("weight_decay", 0.0)) == 0.0:
+                name = "adamw_nodecay"
+            else:
+                name = "adamw_decay"
+        if name in named:
+            anonymous_count += 1
+            name = f"{name}_{anonymous_count}"
+        named[name] = float(group["lr"])
+    return named
+
+
+def summarize_lrs(optimizer):
+    named_lrs = get_named_lrs(optimizer)
+    adamw_lrs = [value for name, value in named_lrs.items() if name.startswith("adamw")]
+    adamw_lr = max(adamw_lrs) if adamw_lrs else None
+    muon_lr = named_lrs.get("muon")
+    if muon_lr is None:
+        muon_values = [value for name, value in named_lrs.items() if name.startswith("muon")]
+        muon_lr = max(muon_values) if muon_values else None
+    return {
+        "adamw_lr": adamw_lr,
+        "muon_lr": muon_lr,
+        "effective_lrs": named_lrs,
+    }
+
+
+def format_lr_text(lr_summary):
+    adamw_lr = lr_summary.get("adamw_lr")
+    muon_lr = lr_summary.get("muon_lr")
+    parts = []
+    if adamw_lr is not None:
+        parts.append(f"adamw_lr {adamw_lr:.4e}")
+    if muon_lr is not None:
+        parts.append(f"muon_lr {muon_lr:.4e}")
+    return " | ".join(parts) if parts else "lr n/a"
 
 
 def autocast_context(device_type, cfg):
@@ -436,7 +488,7 @@ def validate_resume_config(
         raise ValueError("Optimizer changed; use --reset-optimizer to resume with a fresh optimizer")
 
     if not allow_scheduler_change:
-        for key in ("max_steps", "warmup_steps", "max_lr", "min_lr"):
+        for key in ("max_steps", "warmup_steps", "max_lr", "min_lr", "muon_lr", "lr_schedule_start_step", "lr_schedule_steps"):
             if key in saved_train_config and key in current_config and saved_train_config[key] != current_config[key]:
                 raise ValueError(
                     f"Scheduler config {key} changed "
@@ -450,7 +502,15 @@ def validate_resume_config(
                 raise ValueError(f"Data config {key} changed; use --reset-loader-state to ignore saved loader state")
 
 
-def save_checkpoint_metadata(checkpoint_dir, filename, model_config, step=None, val_loss=None, best_val_loss=None):
+def save_checkpoint_metadata(
+    checkpoint_dir,
+    filename,
+    model_config,
+    step=None,
+    val_loss=None,
+    best_val_loss=None,
+    lr_state=None,
+):
     os.makedirs(checkpoint_dir, exist_ok=True)
     metadata = {
         "model_config": asdict(model_config),
@@ -458,7 +518,12 @@ def save_checkpoint_metadata(checkpoint_dir, filename, model_config, step=None, 
         "global_step": step,
         "val_loss": val_loss,
         "best_val_loss": best_val_loss,
+        "lr_state": lr_state or {},
     }
+    if lr_state:
+        metadata["base_lr"] = lr_state.get("base_lr")
+        metadata["adamw_lr"] = lr_state.get("adamw_lr")
+        metadata["muon_lr"] = lr_state.get("muon_lr")
     metadata_name = filename.replace(".pt", "_metadata.pt")
     atomic_torch_save(metadata, os.path.join(checkpoint_dir, metadata_name))
 
@@ -477,6 +542,7 @@ def save_training_checkpoint(
     val_loader,
     grad_accum_steps,
     world_size,
+    lr_state=None,
 ):
     os.makedirs(checkpoint_dir, exist_ok=True)
     payload = {
@@ -493,6 +559,7 @@ def save_training_checkpoint(
             "val": val_loader.state_dict(),
         },
         "rng_state": get_rng_state(),
+        "lr_state": lr_state or {},
         "runtime": {
             "grad_accum_steps": grad_accum_steps,
             "world_size": world_size,
@@ -501,7 +568,7 @@ def save_training_checkpoint(
     }
     path = os.path.join(checkpoint_dir, filename)
     atomic_torch_save(payload, path)
-    save_checkpoint_metadata(checkpoint_dir, filename, model_config, global_step, val_loss, best_val_loss)
+    save_checkpoint_metadata(checkpoint_dir, filename, model_config, global_step, val_loss, best_val_loss, lr_state)
 
 
 def main():
@@ -673,6 +740,13 @@ def main():
         lr = get_lr(step, cfg)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr * param_group.get("lr_scale", 1.0)
+        lr_summary = summarize_lrs(optimizer)
+        lr_state = {
+            "base_lr": float(lr),
+            "adamw_lr": lr_summary.get("adamw_lr"),
+            "muon_lr": lr_summary.get("muon_lr"),
+            "effective_lrs": lr_summary.get("effective_lrs", {}),
+        }
         optimizer.step()
         if device_type == "cuda":
             torch.cuda.synchronize()
@@ -683,10 +757,14 @@ def main():
             tok_per_sec = tokens_processed / dt
             print(
                 f"step {step:5d} | train loss {loss_accum.item():.6f} | "
-                f"lr {lr:.4e} | norm {norm:.4f} | {tok_per_sec:.0f} tok/s"
+                f"{format_lr_text(lr_summary)} | norm {norm:.4f} | {tok_per_sec:.0f} tok/s"
             )
             with open(log_file, "a") as f:
-                f.write(f"{step} train {loss_accum.item():.6f}\n")
+                f.write(
+                    f"{step} train {loss_accum.item():.6f} "
+                    f"adamw_lr {lr_state['adamw_lr']} muon_lr {lr_state['muon_lr']} "
+                    f"base_lr {lr_state['base_lr']:.8e} norm {float(norm):.6f}\n"
+                )
 
         if step % cfg.eval_interval == 0 or last_step:
             val_loss = estimate_val_loss(model, val_loader, cfg, device, device_type, ddp)
@@ -714,6 +792,7 @@ def main():
                         val_loader,
                         grad_accum_steps,
                         world_size,
+                        lr_state,
                     )
 
         save_latest = last_step or (cfg.checkpoint_interval > 0 and step % cfg.checkpoint_interval == 0)
@@ -737,6 +816,7 @@ def main():
                     val_loader,
                     grad_accum_steps,
                     world_size,
+                    lr_state,
                 )
                 if getattr(cfg, "save_step_checkpoints", False):
                     save_training_checkpoint(
@@ -753,6 +833,7 @@ def main():
                         val_loader,
                         grad_accum_steps,
                         world_size,
+                        lr_state,
                     )
 
     if ddp:

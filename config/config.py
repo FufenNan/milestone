@@ -60,9 +60,9 @@ bias = False
 total_batch_size = 405504
 micro_batch_size = 12
 
-# Use a 25,000-step LR schedule so multiple 10,000-step sessions continue on
-# the same cosine curve. Each notebook training session passes --steps 10000.
-max_steps = 25000
+# First session uses the old successful 10,000-step LR schedule. Continue
+# training with config_continue.py so the low-LR phase is explicit.
+max_steps = 10000
 steps_this_run = 10000
 warmup_steps = 400
 

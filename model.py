@@ -331,8 +331,8 @@ class GPT(nn.Module):
             decay_params = [p for p in param_dict.values() if p.dim() >= 2]
             nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
             optim_groups = [
-                {"params": decay_params, "weight_decay": weight_decay, "lr_scale": 1.0},
-                {"params": nodecay_params, "weight_decay": 0.0, "lr_scale": 1.0},
+                {"params": decay_params, "weight_decay": weight_decay, "lr_scale": 1.0, "name": "adamw_decay"},
+                {"params": nodecay_params, "weight_decay": 0.0, "lr_scale": 1.0, "name": "adamw_nodecay"},
             ]
             return self._build_adamw(optim_groups, learning_rate, betas, eps, device_type)
 
@@ -342,9 +342,13 @@ class GPT(nn.Module):
         muon_params, adamw_decay_params, adamw_nodecay_params = self._split_muon_params()
         adamw_groups = []
         if adamw_decay_params:
-            adamw_groups.append({"params": adamw_decay_params, "weight_decay": weight_decay, "lr_scale": 1.0})
+            adamw_groups.append(
+                {"params": adamw_decay_params, "weight_decay": weight_decay, "lr_scale": 1.0, "name": "adamw_decay"}
+            )
         if adamw_nodecay_params:
-            adamw_groups.append({"params": adamw_nodecay_params, "weight_decay": 0.0, "lr_scale": 1.0})
+            adamw_groups.append(
+                {"params": adamw_nodecay_params, "weight_decay": 0.0, "lr_scale": 1.0, "name": "adamw_nodecay"}
+            )
 
         adamw = self._build_adamw(adamw_groups, learning_rate, betas, eps, device_type) if adamw_groups else None
         muon = Muon(
@@ -353,6 +357,7 @@ class GPT(nn.Module):
                     "params": muon_params,
                     "weight_decay": weight_decay,
                     "lr_scale": muon_lr / learning_rate,
+                    "name": "muon",
                 }
             ],
             lr=muon_lr,

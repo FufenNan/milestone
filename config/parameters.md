@@ -37,7 +37,9 @@ This stays below the 100M limit.
 - `total_batch_size`: Effective token batch size across all GPUs and accumulation steps.
 - `micro_batch_size`: Number of sequences per forward/backward pass per process.
 - `max_steps`: Total optimizer steps used by the learning-rate schedule.
-- `steps_this_run`: Optional number of optimizer steps to run in this session. The current Colab workflow uses 10,000-step sessions while keeping `max_steps = 25000`.
+- `steps_this_run`: Optional number of optimizer steps to run in this session. The current Colab workflow uses 10,000-step sessions.
+- `lr_schedule_start_step`: Optional global step where this config's LR schedule starts. Used by low-LR continuation configs.
+- `lr_schedule_steps`: Optional number of optimizer steps in this config's LR schedule window.
 - `warmup_steps`: Linear warmup length.
 - `max_lr` / `min_lr`: Cosine schedule range.
 - `optimizer`: Optimizer choice. The `muon` branch defaults to `"muon"`.
