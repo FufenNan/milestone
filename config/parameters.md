@@ -36,7 +36,8 @@ This stays below the 100M limit.
 
 - `total_batch_size`: Effective token batch size across all GPUs and accumulation steps.
 - `micro_batch_size`: Number of sequences per forward/backward pass per process.
-- `max_steps`: Number of optimizer steps.
+- `max_steps`: Total optimizer steps used by the learning-rate schedule.
+- `steps_this_run`: Optional number of optimizer steps to run in this session. The current Colab workflow uses 10,000-step sessions while keeping `max_steps = 25000`.
 - `warmup_steps`: Linear warmup length.
 - `max_lr` / `min_lr`: Cosine schedule range.
 - `optimizer`: Optimizer choice. The `muon` branch defaults to `"muon"`.
@@ -61,7 +62,7 @@ For the default single-process config:
 - `eval_interval`: Run validation every this many optimizer steps.
 - `eval_iters`: Number of validation batches to average.
 - `log_interval`: Print and log training loss every this many steps.
-- `checkpoint_interval`: Save `checkpoint.pt` every this many steps.
+- `checkpoint_interval`: Legacy interval setting. The current best-only continuation flow saves `checkpoint.pt` when validation improves.
 - `save_step_checkpoints`: Also save numbered checkpoints when enabled.
 
 If `allow_val_train_fallback = True` and no validation shard exists, local smoke tests can use train shards for validation.

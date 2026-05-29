@@ -7,11 +7,11 @@ checkpoint_dir = "checkpoints"
 checkpoint_filename = "checkpoint.pt"
 log_file = "checkpoints/train.log"
 
-# Match the TA-style validation blend during training:
-# FineWeb-Edu 50%, Wikipedia 20%, papers 15%, books 15%.
+# Match the TA-style validation blend during training, using the new
+# no-PubMed PG19 blend from Drive dataset/blend_new:
+# FineWeb-Edu 50%, Wikipedia 20%, arXiv papers 15%, PG19 15%.
 # With grad_accum_steps=33, each optimizer step consumes:
-# 16 FineWeb-Edu, 7 Wikipedia, 5 Papers, 5 Books microbatches.
-# Papers are sampled as 70% arXiv article + 30% PubMed article over time.
+# 16 FineWeb-Edu, 7 Wikipedia, 5 arXiv Papers, 5 PG19 microbatches.
 train_data_mix = [
     {
         "name": "fineweb_edu",
@@ -27,13 +27,12 @@ train_data_mix = [
         "name": "papers",
         "micro_batches": 5,
         "subsets": [
-            {"name": "arxiv", "data_dir": "data/blend/papers_arxiv", "weight": 0.7},
-            {"name": "pubmed", "data_dir": "data/blend/papers_pubmed", "weight": 0.3},
+            {"name": "arxiv", "data_dir": "data/blend/papers_arxiv", "weight": 1.0},
         ],
     },
     {
-        "name": "books",
-        "data_dir": "data/blend/books",
+        "name": "pg19",
+        "data_dir": "data/blend/pg19",
         "micro_batches": 5,
     },
 ]
@@ -61,8 +60,10 @@ bias = False
 total_batch_size = 405504
 micro_batch_size = 12
 
-# 10,000 steps = about 4.06B tokens.
-max_steps = 10000
+# Use a 25,000-step LR schedule so multiple 10,000-step sessions continue on
+# the same cosine curve. Each notebook training session passes --steps 10000.
+max_steps = 25000
+steps_this_run = 10000
 warmup_steps = 400
 
 max_lr = 3e-4
