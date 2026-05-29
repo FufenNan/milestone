@@ -60,10 +60,10 @@ bias = False
 total_batch_size = 405504
 micro_batch_size = 12
 
-# First session uses the old successful 10,000-step LR schedule. Continue
+# First session uses a 12,000-step LR schedule. Continue
 # training with config_continue.py so the low-LR phase is explicit.
-max_steps = 10000
-steps_this_run = 10000
+max_steps = 12000
+steps_this_run = 12000
 warmup_steps = 400
 
 max_lr = 3e-4

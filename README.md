@@ -73,7 +73,7 @@ Single GPU or CPU:
 python train.py --config config/config.py
 ```
 
-The default config uses a 10,000-step LR schedule for the first session. Continue training with `config/config_continue.py`, which starts a separate low-LR phase from the 10,000-step checkpoint. In Colab, the notebook passes `--steps 10000` explicitly.
+The default config uses a 12,000-step LR schedule for the first session. Continue training with `config/config_continue.py`, which starts a separate low-LR phase from the 12,000-step checkpoint. In Colab, the notebook passes `--steps 12000` for the first run and mirrors each saved checkpoint to Drive under the run's `live_checkpoints/` folder.
 
 DDP multi-GPU:
 

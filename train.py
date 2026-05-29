@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import math
 import os
+import shutil
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
@@ -47,6 +48,24 @@ def atomic_torch_save(obj, path):
     tmp_path = f"{path}.tmp"
     torch.save(obj, tmp_path)
     os.replace(tmp_path, path)
+
+
+def atomic_copy(src, dst):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp_path = f"{dst}.tmp"
+    shutil.copy2(src, tmp_path)
+    os.replace(tmp_path, dst)
+
+
+def mirror_checkpoint_files(checkpoint_dir, filename, mirror_dir):
+    if not mirror_dir:
+        return
+    os.makedirs(mirror_dir, exist_ok=True)
+    files = [filename, filename.replace(".pt", "_metadata.pt")]
+    for name in files:
+        src = os.path.join(checkpoint_dir, name)
+        if os.path.exists(src):
+            atomic_copy(src, os.path.join(mirror_dir, name))
 
 
 def torch_load(path, device):
@@ -543,6 +562,7 @@ def save_training_checkpoint(
     grad_accum_steps,
     world_size,
     lr_state=None,
+    mirror_dir=None,
 ):
     os.makedirs(checkpoint_dir, exist_ok=True)
     payload = {
@@ -569,6 +589,7 @@ def save_training_checkpoint(
     path = os.path.join(checkpoint_dir, filename)
     atomic_torch_save(payload, path)
     save_checkpoint_metadata(checkpoint_dir, filename, model_config, global_step, val_loss, best_val_loss, lr_state)
+    mirror_checkpoint_files(checkpoint_dir, filename, mirror_dir)
 
 
 def main():
@@ -580,10 +601,12 @@ def main():
     parser.add_argument("--reset-optimizer", action="store_true")
     parser.add_argument("--reset-rng", action="store_true")
     parser.add_argument("--allow-scheduler-change", action="store_true")
+    parser.add_argument("--checkpoint-mirror-dir", default=None)
     args = parser.parse_args()
     cfg = load_config(args.config)
     resume_path = args.resume or getattr(cfg, "resume_from", None)
     steps_this_run = args.steps or getattr(cfg, "steps_this_run", None)
+    checkpoint_mirror_dir = args.checkpoint_mirror_dir or getattr(cfg, "checkpoint_mirror_dir", None)
 
     ddp, rank, local_rank, world_size, device, master_process = setup_ddp()
     device_type = "cuda" if str(device).startswith("cuda") else "cpu"
@@ -594,6 +617,8 @@ def main():
 
     data_dir = repo_path(cfg.data_dir)
     checkpoint_dir = repo_path(cfg.checkpoint_dir)
+    if checkpoint_mirror_dir:
+        checkpoint_mirror_dir = repo_path(checkpoint_mirror_dir)
     log_file = repo_path(cfg.log_file)
 
     B = cfg.micro_batch_size
@@ -611,6 +636,9 @@ def main():
                 f.write("")
         print(f"device: {device}")
         print(f"gradient accumulation steps: {grad_accum_steps}")
+        if checkpoint_mirror_dir:
+            os.makedirs(checkpoint_mirror_dir, exist_ok=True)
+            print(f"checkpoint mirror: {checkpoint_mirror_dir}")
 
     train_mix = getattr(cfg, "train_data_mix", None)
     if train_mix:
@@ -793,6 +821,7 @@ def main():
                         grad_accum_steps,
                         world_size,
                         lr_state,
+                        checkpoint_mirror_dir,
                     )
 
         save_latest = last_step or (cfg.checkpoint_interval > 0 and step % cfg.checkpoint_interval == 0)
@@ -817,6 +846,7 @@ def main():
                     grad_accum_steps,
                     world_size,
                     lr_state,
+                    checkpoint_mirror_dir,
                 )
                 if getattr(cfg, "save_step_checkpoints", False):
                     save_training_checkpoint(
@@ -834,6 +864,7 @@ def main():
                         grad_accum_steps,
                         world_size,
                         lr_state,
+                        checkpoint_mirror_dir,
                     )
 
     if ddp:

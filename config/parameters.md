@@ -7,6 +7,7 @@ This file explains the main parameters in `config/config.py`.
 - `data_dir`: Directory containing tokenized `.bin` shards such as `fineweb_train_000001.bin`.
 - `checkpoint_dir`: Directory where checkpoints are written.
 - `checkpoint_filename`: Latest checkpoint name. The training path uses `checkpoint.pt`.
+- `checkpoint_mirror_dir`: Optional extra directory where every saved latest/best checkpoint and metadata sidecar are copied, useful for live Drive backup during Colab training.
 - `log_file`: Training log path.
 
 ## Model
@@ -37,7 +38,7 @@ This stays below the 100M limit.
 - `total_batch_size`: Effective token batch size across all GPUs and accumulation steps.
 - `micro_batch_size`: Number of sequences per forward/backward pass per process.
 - `max_steps`: Total optimizer steps used by the learning-rate schedule.
-- `steps_this_run`: Optional number of optimizer steps to run in this session. The current Colab workflow uses 10,000-step sessions.
+- `steps_this_run`: Optional number of optimizer steps to run in this session. The current Colab workflow uses a 12,000-step first session and 10,000-step continuation sessions.
 - `lr_schedule_start_step`: Optional global step where this config's LR schedule starts. Used by low-LR continuation configs.
 - `lr_schedule_steps`: Optional number of optimizer steps in this config's LR schedule window.
 - `warmup_steps`: Linear warmup length.

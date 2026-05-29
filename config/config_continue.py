@@ -14,10 +14,10 @@ for _key, _value in vars(_base).items():
         globals()[_key] = _value
 
 
-# Continue from the first 10,000-step run with a low-LR refinement phase.
-max_steps = 20000
+# Continue from the first 12,000-step run with a low-LR refinement phase.
+max_steps = 22000
 steps_this_run = 10000
-lr_schedule_start_step = 10000
+lr_schedule_start_step = 12000
 lr_schedule_steps = 10000
 warmup_steps = 0
 
